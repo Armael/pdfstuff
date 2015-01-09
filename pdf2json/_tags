@@ -1,0 +1,1 @@
+true: package(batteries), package(camlpdf), package(yojson), package(camomile), package(gg), use_graphics, debug
