@@ -1,14 +1,12 @@
-open Batteries
 open Gg
 
-module Pt = Pdftransform
-type trans_m = Pt.transform_matrix
+type trans_m = Pdftransform.transform_matrix
 
 module type State = sig
-  module Marked : sig
+  module MarkedBy : sig
     type t = private <
-      get : (string * Pdf.pdfobject option) option;
-      set : (string * Pdf.pdfobject option) option -> unit;
+      get : (string * Pdf.pdfobject option) list;
+      set : (string * Pdf.pdfobject option) list -> unit;
       .. >
     val init : t
   end
@@ -19,7 +17,6 @@ module type State = sig
       set_transformation_matrix : trans_m -> unit;
       line_matrix: trans_m;
       set_line_matrix : trans_m -> unit;
-      (* rendering_matrix: trans_m; *)
       .. >
     val init : t
   end
@@ -58,7 +55,7 @@ module type State = sig
       l : float;
 
       (* Text font *)
-      f : string;
+      f : Pdf.pdfobject * Pdftext.font;
 
       (* Text font size *)
       fs : float;
@@ -99,6 +96,7 @@ module type State = sig
   end
 
   type page_desc = private <
+    pdf : Pdf.t; page : Pdfpage.t;
     frame : Box2.t;
     st : Graphics.t;
     set_st : Graphics.t -> unit;
@@ -110,9 +108,9 @@ module type State = sig
 end
 
 module BaseState = struct
-  module Marked = struct
+  module MarkedBy = struct
     class t = object
-      val mutable v : (string * Pdf.pdfobject option) option = None
+      val mutable v : (string * Pdf.pdfobject option) list = []
       method get = v
       method set v' = v <- v'
     end
@@ -121,11 +119,11 @@ module BaseState = struct
 
   module Text = struct
     class t = object
-      val mutable transformation_matrix = Pt.i_matrix;
+      val mutable transformation_matrix = Pdftransform.i_matrix;
       method transformation_matrix = transformation_matrix
       method set_transformation_matrix m = transformation_matrix <- m
 
-      val mutable line_matrix = Pt.i_matrix;
+      val mutable line_matrix = Pdftransform.i_matrix;
       method line_matrix = line_matrix
       method set_line_matrix m = line_matrix <- m
     end
@@ -153,7 +151,7 @@ module BaseState = struct
     }
 
     class t = object
-      val mutable transformation_matrix = Pt.i_matrix;
+      val mutable transformation_matrix = Pdftransform.i_matrix;
       method transformation_matrix = transformation_matrix
       method set_transformation_matrix m = transformation_matrix <- m
 
@@ -200,9 +198,9 @@ module Make = functor (State : State) ->
 struct
   class type ['a] reader = object
     method page_description_level :
-      State.page_desc -> State.Marked.t -> Pdfops.t list -> 'a -> 'a
+      State.page_desc -> State.MarkedBy.t -> Pdfops.t list -> 'a -> 'a
     method text_object :
-      State.page_desc -> State.Text.t -> State.Marked.t -> Pdfops.t list -> 'a -> 'a
+      State.page_desc -> State.Text.t -> State.MarkedBy.t -> Pdfops.t list -> 'a -> 'a
     method path_object : State.page_desc -> State.Path.t -> Pdfops.t list -> 'a -> 'a
     method clipping_path_object : State.page_desc -> State.Path.t -> Pdfops.t list -> 'a -> 'a
 
@@ -215,9 +213,9 @@ struct
     method text_state_op :
       State.page_desc -> Pdfops.t -> 'a -> 'a option
     method marked_content_op_at_pagedesc :
-      State.page_desc -> State.Marked.t -> Pdfops.t -> 'a -> 'a option
+      State.page_desc -> State.MarkedBy.t -> Pdfops.t -> 'a -> 'a option
     method marked_content_op_at_textobj :
-      State.page_desc -> State.Text.t -> State.Marked.t -> Pdfops.t -> 'a ->
+      State.page_desc -> State.Text.t -> State.MarkedBy.t -> Pdfops.t -> 'a ->
       'a option
     method text_showing_op :
       State.page_desc -> State.Text.t -> Pdfops.t -> 'a -> 'a option
@@ -230,6 +228,96 @@ struct
 
     method page : Pdf.t -> Pdfpage.t -> 'a -> 'a
   end
+
+
+  (* Utilities *)
+  let rendering_matrix (st: State.page_desc) (text_st: State.Text.t) =
+    let open State in
+    let open Graphics in
+    let text_params_m =
+      Pdftransform.{
+        a = st#st#text.fs *. st#st#text.h;
+        b = 0.;
+        c = 0.;
+        d = st#st#text.fs;
+        e = 0.;
+        f = st#st#text.rise;
+      } in
+    Pdftransform.(matrix_compose
+                    (matrix_compose
+                       text_params_m
+                       text_st#transformation_matrix)
+                    st#st#transformation_matrix)
+
+  let character_codes_of_text (st: State.page_desc) (text: string): int list =
+    let open Pdfutil in
+    let _, font = st#st#text.State.Graphics.f in
+    (* Copy&paste from pdftext.ml glyphnames_and_codepoints_of_text, except we
+       don't directly map the extractor on the caracter codes. *)
+    (* For now, the only composite font encoding scheme we understand is
+       /Identity-H *)
+    let is_identity_h = function
+      | Pdftext.CIDKeyedFont (_, _, Pdftext.Predefined "/Identity-H") -> true
+      | _ -> false in
+    if is_identity_h font then
+    let chars = map int_of_char (explode text) in
+      if odd (length chars) then raise (Pdf.PDFError "Bad Text") else
+        map (fun (h, l) -> (h lsl 8) lor l) (pairs_of_list chars)
+    else
+      map (int_of_char) (explode text)
+
+  let character_codes_width
+      (st: State.page_desc)
+      (char_codes: [`CharCodes of int list | `Adjust of float] list):
+    float =
+    let open Pdftext in
+    let open State in
+    let open State.Graphics in
+    let width_char w c =
+      let tw = if c = 32 then st#st#text.w else 0. in
+      (w *. st#st#text.fs +. st#st#text.c +. tw) *.
+      st#st#text.h
+    in
+    let width_adjust a =
+      -. (a /. 1000.) *. st#st#text.fs *. st#st#text.h in
+    let rec width_charcodes get_kern get_width = function
+      | [] -> 0.
+      | [h] -> width_char (get_width h) h
+      | h :: h' :: t ->
+        let w = get_width h and k = get_kern h h' in
+        (width_char (w +. k) h) +.
+        (width_charcodes get_kern get_width (h' :: t))
+    in
+    let width get_kern get_width = List.fold_left (fun w -> function
+      | `CharCodes l -> w +. (width_charcodes get_kern get_width l)
+      | `Adjust a -> w +. (width_adjust a)
+    ) 0. in
+
+    let get_width, get_kern =
+      match snd st#st#text.f with
+      | StandardFont (font, _) ->
+        let _, widths, kerning = Pdfstandard14.afm_data font in
+        (fun c ->
+           try Hashtbl.find widths c |> float_of_int
+           with Not_found -> 0.),
+        (fun c c' ->
+           try Hashtbl.find kerning (c, c') |> float_of_int
+           with Not_found -> 0.)
+      | SimpleFont font ->
+        let widths = match font.fontmetrics with
+          | None -> raise (Pdf.PDFError "No /Widths")
+          | Some w -> w in
+        (fun c -> widths.(c)), (fun _ _ -> 0.)
+      | CIDKeyedFont (_, font, _) ->
+        let default_width = float_of_int font.cid_default_width in
+        (fun c ->
+           try List.assoc c font.cid_widths with
+              Not_found -> default_width),
+        (fun _ _ -> 0.)
+    in
+    width get_kern get_width char_codes
+
+  (* ---- *)
 
   class ['a] read : ['a] reader = object(r)
     method page_description_level st m ops acc =
@@ -255,13 +343,14 @@ struct
         | None ->
           match op with
           | Op_BT ->
-            r#text_object st State.Text.init State.Marked.init ops acc
+            r#text_object st State.Text.init State.MarkedBy.init ops acc
           | Op_m _
           | Op_re _ ->
             r#path_object st State.Path.init (op::ops) acc
-          | Op_sh _ -> failwith "todo"
-          | Op_Do _ -> failwith "todo"
-          | InlineImage _ -> failwith "todo"
+          | Op_sh _
+          | Op_Do _
+          | InlineImage _ ->
+            r#page_description_level st m ops acc
           | Op_Unknown s ->
             (* todo: not fail? *)
             failwith (Printf.sprintf "Pdfops.Op_Unknown %s" s)
@@ -291,7 +380,7 @@ struct
           r#text_object st text_st m ops acc
         | None ->
           match op with
-          | Op_ET -> r#page_description_level st State.Marked.init ops acc
+          | Op_ET -> r#page_description_level st State.MarkedBy.init ops acc
           | _ -> (* invalid pdf *) assert false
 
     method path_object st path_st ops acc =
@@ -307,7 +396,7 @@ struct
         | None ->
           match r#path_painting_op st path_st op acc with
           | Some acc ->
-            r#page_description_level st State.Marked.init ops acc
+            r#page_description_level st State.MarkedBy.init ops acc
           | None ->
             match op with
             | Op_W
@@ -322,7 +411,7 @@ struct
       | op :: ops ->
         match r#path_painting_op st path_st op acc with
         | Some acc ->
-          r#page_description_level st State.Marked.init ops acc
+          r#page_description_level st State.MarkedBy.init ops acc
         | None -> (* invalid pdf *) assert false
 
     method general_graphics_state_op st op acc =
@@ -349,7 +438,7 @@ struct
         st#pop_st; Some acc
       | Op_cm m ->
         st#st#set_transformation_matrix
-          (Pt.matrix_compose m st#st#transformation_matrix);
+          (Pdftransform.matrix_compose m st#st#transformation_matrix);
         Some acc
       | _ -> None
 
@@ -385,81 +474,111 @@ struct
         st#st#set_text {st#st#text with h}; Some acc
       | Op_TL l ->
         st#st#set_text {st#st#text with l}; Some acc
-      | Op_Tf (f, fs) ->
+      | Op_Tf (fontname, fs) ->
+        let f =
+          match Pdf.lookup_direct st#pdf "/Font" st#page.Pdfpage.resources with
+          | None -> raise (Pdf.PDFError "Missing /Font in text extraction")
+          | Some d ->
+            match Pdf.lookup_direct st#pdf fontname d with
+            | None -> raise (Pdf.PDFError "Missing font in text extraction")
+            | Some d -> d, Pdftext.read_font st#pdf d
+        in
         st#st#set_text {st#st#text with f; fs}; Some acc
       | Op_Tr _ -> Some acc
       | Op_Ts rise ->
         st#st#set_text {st#st#text with rise}; Some acc
       | _ -> None
 
-    method marked_content_op_at_pagedesc st m op acc =
+    method private marked_content_aux m op acc =
       let open Pdfops in
       match op with
       (* Marked content (MP, DP, BMC, BDC, EMC) *)
       | Op_MP _
-      | Op_DP _
-      | Op_BMC _
-      | Op_BDC _
-      | Op_EMC -> Some acc (* todo *)
+      | Op_DP (_, _) -> Some acc
+      | Op_BMC tag ->
+        m#set ((tag, None) :: m#get);
+        Some acc
+      | Op_BDC (tag, properties) ->
+        m#set ((tag, Some properties) :: m#get);
+        Some acc
+      | Op_EMC ->
+        (match m#get with
+        | [] -> raise (Pdf.PDFError "EMC without a matching BMC or BDC")
+        | _ :: xs -> m#set xs);
+        Some acc
       | _ -> None
 
+    method marked_content_op_at_pagedesc st m op acc =
+      r#marked_content_aux m op acc
+
     method marked_content_op_at_textobj st text_st m op acc =
-      let open Pdfops in
-      match op with
-      (* Marked content (MP, DP, BMC, BDC, EMC) *)
-      | Op_MP _
-      | Op_DP _
-      | Op_BMC _
-      | Op_BDC _
-      | Op_EMC -> Some acc (* todo *)
-      | _ -> None
+      r#marked_content_aux m op acc
 
     method text_showing_op st text_st op acc =
       let open Pdfops in
+      let translate_tm tx ty =
+        text_st#set_transformation_matrix (Pdftransform.(
+          matrix_compose (mktranslate tx ty) text_st#transformation_matrix
+        )) in
+      let perform_Td tx ty =
+        let new_m = Pdftransform.(
+          matrix_compose (mktranslate tx ty) text_st#line_matrix
+        ) in
+        text_st#set_line_matrix new_m;
+        text_st#set_transformation_matrix new_m in
+      let perform_Tj txt =
+        let tx = character_codes_width st
+            [`CharCodes (character_codes_of_text st txt)] in
+        translate_tm tx 0. in
+      let perform_' txt =
+        perform_Td 0. st#st#text.State.Graphics.l;
+        perform_Tj txt in
+
       match op with
       (* Text showing (Tj, TJ, ', '') *)
-      | Op_Tj txt ->
-        (*     begin match ctx.text with
-               | Nil -> print_endline "err Op_Tj and no Op_BT before?"
-               | Writing { tm; _ } ->
-                texts := (timg tm V2.zero, txt) :: !texts
-               end *)
+      | Op_Tj txt -> perform_Tj txt; Some acc
+      | Op_' txt -> perform_' txt; Some acc
+      | Op_'' (aw, ac, txt) ->
+        st#st#set_text {st#st#text with
+                        State.Graphics.w = aw;
+                        State.Graphics.c = ac};
+        perform_' txt;
         Some acc
-      | Op_' txt ->
-        (* process Op_T'; process (Op_Tj txt) *)
-        failwith "todo"
-      | Op_'' (_, _, txt) -> (* process (Op_' txt) *)
-        failwith "todo"
-      | Op_TJ (Pdf.Array l) -> (* i'm lazy *)
-        (* let txt = l *)
-        (*           |> List.filter_map (function Pdf.String s -> Some s | _ -> None) *)
-        (*           |> List.reduce (^) *)
-        (* in *)
-        (* process (Op_Tj txt) *)
-        failwith "todo"
+      | Op_TJ (Pdf.Array l) ->
+        let charcodes = Pdfutil.option_map (function
+          | Pdf.String txt ->
+            Some (`CharCodes (character_codes_of_text st txt))
+          | Pdf.Integer i ->
+            Some (`Adjust (float_of_int i))
+          | Pdf.Real f ->
+            Some (`Adjust f)
+          | _ -> None) l in
+        translate_tm (character_codes_width st charcodes) 0.;
+        Some acc
       | _ -> None
 
     method text_positioning_op st text_st op acc =
       let open Pdfops in
+      let perform_Td tx ty =
+        let new_m = Pdftransform.(
+          matrix_compose (mktranslate tx ty) text_st#line_matrix
+        ) in
+        text_st#set_line_matrix new_m;
+        text_st#set_transformation_matrix new_m in
       match op with
       (* Text positioning (Td, TD, Tm, T* ) *)
-      | Op_Td (tx, ty)
+      | Op_Td (tx, ty) -> perform_Td tx ty; Some acc
       | Op_TD (tx, ty) ->
-
-
-        (* begin match ctx.text with *)
-        (*   | Nil -> print_endline "err Op_Td and no Op_BT before?" *)
-        (*   | Writing { tm; tlm } -> *)
-        (*     let m = Pt.matrix_compose (Pt.mktranslate tx ty) tlm in *)
-        (*     ctx.text <- Writing { tm = m; tlm = m } *)
-        (* end *)
+        st#st#set_text {st#st#text with State.Graphics.l = -. ty};
+        perform_Td tx ty;
         Some acc
       | Op_Tm m ->
-        (* ctx.text <- Writing { tm = m; tlm = m } *)
-        failwith "todo"
+        text_st#set_line_matrix m;
+        text_st#set_transformation_matrix m;
+        Some acc
       | Op_T' ->
-        (* process (Op_Td (0., 0.)) *)
-        failwith "todo"
+        perform_Td 0. st#st#text.State.Graphics.l;
+        Some acc
       | _ -> None
 
     method path_construction_op st path_st op acc =
@@ -518,122 +637,63 @@ struct
       let init = State.page_desc_init ~frame in
       let ops = Pdfops.parse_operators doc
           page.Pdfpage.resources page.Pdfpage.content in
-      r#page_description_level init State.Marked.init ops acc
+      r#page_description_level init State.MarkedBy.init ops acc
   end
 end
   
-(* let collect (pdf: Pdf.t) (page: Pdfpage.t) = *)
-(*   let num x = match x with *)
-(*     | Pdf.Integer n -> float_of_int n *)
-(*     | Pdf.Real f -> f *)
-(*     | _ -> failwith "NaN" *)
-(*   in *)
-(*   let Pdf.Array [llx; lly; urx; ury] = page.Pdfpage.mediabox in *)
-(*   let llx = num llx and lly = num lly *)
-(*   and urx = num urx and ury = num ury in *)
-  
-(*   let frame = Box2.v (V2.v llx lly) (V2.v (urx -. llx) (ury -. lly)) in *)
-  
-(*   let ctx = { *)
-(*     frame; *)
-(*     path = Nil; *)
-(*     text = Nil; *)
-(*     transform = Pt.i_matrix; *)
-(*   } in *)
 
-(*   let ctx_stack = Queue.create () in *)
-  
-(*   let pdf = Pdfpage.change_pages false pdf [page] in *)
-(*   let ops = Pdfops.parse_operators pdf *)
-(*     page.Pdfpage.resources page.Pdfpage.content in *)
+(* Font and glyph metrics
 
-(*   let lines = ref [] *)
-(*   and rects = ref [] *)
-(*   and texts = ref [] *)
-(*   in *)
+   After painting some glyphs (using e.g. Tj), we need to update the text matrix
+   Tm. Section 5.3.3 gives the formula for computing the translation matrix. We
+   need in particular the glyph's horizontal and vertical displacements.
 
-(*   let img (p: p2) = *)
-(*     let (ix, iy) = Pt.transform_matrix *)
-(*       ctx.transform *)
-(*       (V2.x p, V2.y p) *)
-(*     in *)
-(*     V2.v ix iy *)
-(*   in *)
+   Type 0 fonts = composite fonts
 
-(*   let timg (tm: trans_m) (p: p2) = *)
-(*     let (ix, iy) = Pt.transform_matrix *)
-(*       (Pt.matrix_compose tm ctx.transform) *)
-(*       (V2.x p, V2.y p) *)
-(*     in *)
-(*     V2.v ix iy *)
-(*   in *)
+   Other fonts = simple fonts
 
-(*   let rec process op = *)
-(*     let open Pdfops in *)
-(*     match op with *)
-(*     | Op_q -> Queue.push (ctx |> Obj.repr |> Obj.dup |> Obj.obj) ctx_stack *)
-(*     | Op_Q -> let old_ctx = Queue.pop ctx_stack in *)
-(*               ctx.path <- old_ctx.path; *)
-(*               ctx.text <- old_ctx.text; *)
-(*               ctx.transform <- old_ctx.transform *)
-(*     | Op_cm m -> *)
-(*       ctx.transform <- Pt.matrix_compose m ctx.transform; *)
-(*     | Op_m (x, y) -> *)
-(*       ctx.path <- Drawing (V2.v x y, V2.v x y) *)
-(*     | Op_l (x', y') -> *)
-(*       begin match ctx.path with *)
-(*       | Nil -> print_endline "errr Op_l and no Op_m before?" *)
-(*       | Drawing (init, v) -> *)
-(*         let v' = V2.v x' y' in *)
-(*         ctx.path <- Drawing (init, v'); *)
-(*         lines := (img v, img v') :: !lines *)
-(*       end *)
-(*     | Op_h -> *)
-(*       begin match ctx.path with *)
-(*       | Nil -> print_endline "errr Op_h and no Op_m before?" *)
-(*       | Drawing (init, v) -> *)
-(*         ctx.path <- Nil; (\* ? *\) *)
-(*         lines := (img v, img init) :: !lines *)
-(*       end *)
-(*     | Op_re (x, y, w, h) -> *)
-(*       rects := (Box2.v (img (V2.v x y)) (img (V2.v w h))) :: !rects *)
-        
-(*     | Op_BT -> *)
-(*       ctx.text <- Writing { tm = Pt.i_matrix; tlm = Pt.i_matrix } *)
-(*     | Op_ET -> *)
-(*       ctx.text <- Nil *)
-(*     | Op_TD (tx, ty) *)
-(*     | Op_Td (tx, ty) -> *)
-(*       begin match ctx.text with *)
-(*       | Nil -> print_endline "err Op_Td and no Op_BT before?" *)
-(*       | Writing { tm; tlm } -> *)
-(*         let m = Pt.matrix_compose (Pt.mktranslate tx ty) tlm in *)
-(*         ctx.text <- Writing { tm = m; tlm = m } *)
-(*       end *)
-(*     | Op_Tm m -> *)
-(*       ctx.text <- Writing { tm = m; tlm = m } *)
-(*     | Op_T' -> *)
-(*       process (Op_Td (0., 0.)) *)
-(*     | Op_Tj txt -> *)
-(*       begin match ctx.text with *)
-(*       | Nil -> print_endline "err Op_Tj and no Op_BT before?" *)
-(*       | Writing { tm; _ } -> *)
-(*         texts := (timg tm V2.zero, txt) :: !texts *)
-(*       end *)
-(*     | Op_' txt -> process Op_T'; process (Op_Tj txt) *)
-(*     | Op_'' (_, _, txt) -> process (Op_' txt) *)
-(*     | Op_TJ (Pdf.Array l) -> (\* i'm lazy *\) *)
-(*       let txt = l *)
-(*         |> List.filter_map (function Pdf.String s -> Some s | _ -> None) *)
-(*         |> List.reduce (^) *)
-(*       in *)
-(*       process (Op_Tj txt) *)
+   + Simple fonts:
 
-(*     | _ -> () *)
-(*   in *)
+   nb: glyphs are single byte codes, obtained from the string; these codes index
+   a table of 256 glyphs, the mapping from code to glyph is called the font's
+   encoding.
 
-(*   List.iter process ops; *)
-(*   (List.rev !lines, List.rev !rects, List.rev !texts) *)
+   Simple fonts only support horizontal writing, therefore glyph metrics only
+   include glyph width.
+
+   - For the standard 14 type 1 fonts, font metrics are in fact predefined;
+     Pdfstandard14 gives access to this data.  (special treatment for these
+     fonts is deprecated as pdf 1.5, but camlpdf still treat them separately -
+     see the Pdftext.font type)
+
+   - Other simple fonts (spec §5.5): glyph widths parsed by camlpdf and stored
+     in the fontmetrics array, indexed by character codes
+
+
+   + Composite fonts:
+
+   nb: a glyph is represented by a sequence of one or more bytes. camlpdf seems
+   to lack an exported primitive to iterate on the character codes, knowing the
+   encoding. glyphnames_and_codepoints_of_text does this, and maps the extractor
+   on the character codes. -> c&p without mapping the extractor
+
+   camlpdf handles only one CMap (type cmap_encoding): Predefined "/Identity-H"
+   (not a big deal, other ones seem to be used for japanase/chinise/korean
+   writing). Identity-H has 16 bits character codes.
+
+
+   -----
+
+   Encoding: 
+
+   Association character code -> glyph
+
+   -----
+
+   To extract text from a string of character codes, just use
+   Pdftext.text_extractor_of_font & co, it uses the /ToUnicode map if present
+   etc. Support seems however limited for composite fonts.
+*)
 
 
 (*****************

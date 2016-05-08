@@ -1,10 +1,10 @@
 open Gg
 
 module type State = sig
-  module Marked : sig
+  module MarkedBy : sig
     type t = private <
-      get : (string * Pdf.pdfobject option) option;
-      set : (string * Pdf.pdfobject option) option -> unit;
+      get : (string * Pdf.pdfobject option) list;
+      set : (string * Pdf.pdfobject option) list -> unit;
       .. >
     val init : t
   end
@@ -15,7 +15,6 @@ module type State = sig
       set_transformation_matrix : Pdftransform.transform_matrix -> unit;
       line_matrix: Pdftransform.transform_matrix;
       set_line_matrix : Pdftransform.transform_matrix -> unit;
-      (* rendering_matrix: trans_m; *)
       .. >
     val init : t
   end
@@ -54,7 +53,7 @@ module type State = sig
       l : float;
 
       (* Text font *)
-      f : string;
+      f : Pdf.pdfobject * Pdftext.font;
 
       (* Text font size *)
       fs : float;
@@ -95,6 +94,7 @@ module type State = sig
   end
 
   type page_desc = private <
+    pdf : Pdf.t; page : Pdfpage.t;
     frame : Box2.t;
     st : Graphics.t;
     set_st : Graphics.t -> unit;
@@ -110,9 +110,9 @@ module BaseState : State
 module Make : functor (State: State) -> sig
   class type ['a] reader = object
     method page_description_level :
-      State.page_desc -> State.Marked.t -> Pdfops.t list -> 'a -> 'a
+      State.page_desc -> State.MarkedBy.t -> Pdfops.t list -> 'a -> 'a
     method text_object :
-      State.page_desc -> State.Text.t -> State.Marked.t -> Pdfops.t list -> 'a -> 'a
+      State.page_desc -> State.Text.t -> State.MarkedBy.t -> Pdfops.t list -> 'a -> 'a
     method path_object : State.page_desc -> State.Path.t -> Pdfops.t list -> 'a -> 'a
     method clipping_path_object : State.page_desc -> State.Path.t -> Pdfops.t list -> 'a -> 'a
 
@@ -125,9 +125,9 @@ module Make : functor (State: State) -> sig
     method text_state_op :
       State.page_desc -> Pdfops.t -> 'a -> 'a option
     method marked_content_op_at_pagedesc :
-      State.page_desc -> State.Marked.t -> Pdfops.t -> 'a -> 'a option
+      State.page_desc -> State.MarkedBy.t -> Pdfops.t -> 'a -> 'a option
     method marked_content_op_at_textobj :
-      State.page_desc -> State.Text.t -> State.Marked.t -> Pdfops.t -> 'a ->
+      State.page_desc -> State.Text.t -> State.MarkedBy.t -> Pdfops.t -> 'a ->
       'a option
     method text_showing_op :
       State.page_desc -> State.Text.t -> Pdfops.t -> 'a -> 'a option
@@ -141,5 +141,14 @@ module Make : functor (State: State) -> sig
     method page : Pdf.t -> Pdfpage.t -> 'a -> 'a
   end
 
-  class ['a] read : ['a] reader  
+  class ['a] read : ['a] reader
+
+  (* Utilities *)
+  val rendering_matrix :
+    State.page_desc -> State.Text.t -> Pdftransform.transform_matrix
+  val character_codes_of_text :
+    State.page_desc -> string -> int list
+  val character_codes_width :
+      State.page_desc -> [`CharCodes of int list | `Adjust of float] list ->
+      float
 end
