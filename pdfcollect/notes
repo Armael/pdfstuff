@@ -1,0 +1,52 @@
+
+   Font and glyph metrics
+
+   After painting some glyphs (using e.g. Tj), we need to update the text matrix
+   Tm. Section 5.3.3 gives the formula for computing the translation matrix. We
+   need in particular the glyph's horizontal and vertical displacements.
+
+   Type 0 fonts = composite fonts
+
+   Other fonts = simple fonts
+
+   + Simple fonts:
+
+   nb: glyphs are single byte codes, obtained from the string; these codes index
+   a table of 256 glyphs, the mapping from code to glyph is called the font's
+   encoding.
+
+   Simple fonts only support horizontal writing, therefore glyph metrics only
+   include glyph width.
+
+   - For the standard 14 type 1 fonts, font metrics are in fact predefined;
+     Pdfstandard14 gives access to this data.  (special treatment for these
+     fonts is deprecated as pdf 1.5, but camlpdf still treat them separately -
+     see the Pdftext.font type)
+
+   - Other simple fonts (spec §5.5): glyph widths parsed by camlpdf and stored
+     in the fontmetrics array, indexed by character codes
+
+
+   + Composite fonts:
+
+   nb: a glyph is represented by a sequence of one or more bytes. camlpdf seems
+   to lack an exported primitive to iterate on the character codes, knowing the
+   encoding. glyphnames_and_codepoints_of_text does this, and maps the extractor
+   on the character codes. -> c&p without mapping the extractor
+
+   camlpdf handles only one CMap (type cmap_encoding): Predefined "/Identity-H"
+   (not a big deal, other ones seem to be used for japanase/chinise/korean
+   writing). Identity-H has 16 bits character codes.
+
+
+   -----
+
+   Encoding:
+
+   Association character code -> glyph
+
+   -----
+
+   To extract text from a string of character codes, just use
+   Pdftext.text_extractor_of_font & co, it uses the /ToUnicode map if present
+   etc. Support seems however limited for composite fonts.
