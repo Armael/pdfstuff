@@ -6,7 +6,7 @@ module type State = sig
       get : (string * Pdf.pdfobject option) list;
       set : (string * Pdf.pdfobject option) list -> unit;
       .. >
-    val init : t
+    val create : unit -> t
   end
 
   module Text : sig
@@ -16,12 +16,12 @@ module type State = sig
       line_matrix: Pdftransform.transform_matrix;
       set_line_matrix : Pdftransform.transform_matrix -> unit;
       .. >
-    val init : t
+    val create : unit -> t
   end
 
   module Path : sig
     type t = private < .. >
-    val init : t
+    val create : unit -> t
   end
 
   module Graphics : sig
@@ -53,7 +53,7 @@ module type State = sig
       l : float;
 
       (* Text font *)
-      f : Pdf.pdfobject * Pdftext.font;
+      f : (Pdf.pdfobject * Pdftext.font) option;
 
       (* Text font size *)
       fs : float;
@@ -68,7 +68,7 @@ module type State = sig
       (* k : float; *)
     }
 
-    val text_init : text
+    val text_create : unit -> text
 
     type t = private <
       transformation_matrix: Pdftransform.transform_matrix; (* CTM *)
@@ -90,11 +90,12 @@ module type State = sig
       (* alpha constant : todo *)
       (* alpha source : todo *)
       .. >
-    val init : t
+    val create : unit -> t
   end
 
   type page_desc = private <
-    pdf : Pdf.t; page : Pdfpage.t;
+    pdf : Pdf.t;
+    page : Pdfpage.t;
     frame : Box2.t;
     st : Graphics.t;
     set_st : Graphics.t -> unit;
@@ -102,53 +103,84 @@ module type State = sig
     pop_st : unit;
     push_st : unit;
     .. >
-  val page_desc_init : frame:Box2.t -> page_desc
+  val page_desc_create :
+    pdf:Pdf.t ->
+    page:Pdfpage.t ->
+    frame:Box2.t ->
+    page_desc
 end
 
 module BaseState : State
 
+type op_result = [ `Ok | `BadOp ]
+
 module Make : functor (State: State) -> sig
-  class type ['a] reader = object
+  class type reader = object
     method page_description_level :
-      State.page_desc -> State.MarkedBy.t -> Pdfops.t list -> 'a -> 'a
+      State.page_desc -> State.MarkedBy.t -> Pdfops.t list -> unit
     method text_object :
-      State.page_desc -> State.Text.t -> State.MarkedBy.t -> Pdfops.t list -> 'a -> 'a
-    method path_object : State.page_desc -> State.Path.t -> Pdfops.t list -> 'a -> 'a
-    method clipping_path_object : State.page_desc -> State.Path.t -> Pdfops.t list -> 'a -> 'a
+      State.page_desc -> State.Text.t -> State.MarkedBy.t -> Pdfops.t list -> unit
+    method path_object : State.page_desc -> State.Path.t -> Pdfops.t list -> unit
+    method clipping_path_object : State.page_desc -> State.Path.t -> Pdfops.t list -> unit
 
     method general_graphics_state_op :
-      State.page_desc -> Pdfops.t -> 'a -> 'a option
+      State.page_desc -> Pdfops.t -> op_result
     method special_graphics_state_op :
-      State.page_desc -> Pdfops.t -> 'a -> 'a option
+      State.page_desc -> Pdfops.t -> op_result
     method color_op :
-      State.page_desc -> Pdfops.t -> 'a -> 'a option
+      State.page_desc -> Pdfops.t -> op_result
     method text_state_op :
-      State.page_desc -> Pdfops.t -> 'a -> 'a option
+      State.page_desc -> Pdfops.t -> op_result
     method marked_content_op_at_pagedesc :
-      State.page_desc -> State.MarkedBy.t -> Pdfops.t -> 'a -> 'a option
+      State.page_desc -> State.MarkedBy.t -> Pdfops.t -> op_result
     method marked_content_op_at_textobj :
-      State.page_desc -> State.Text.t -> State.MarkedBy.t -> Pdfops.t -> 'a ->
-      'a option
+      State.page_desc -> State.Text.t -> State.MarkedBy.t -> Pdfops.t ->
+      op_result
     method text_showing_op :
-      State.page_desc -> State.Text.t -> Pdfops.t -> 'a -> 'a option
+      State.page_desc -> State.Text.t -> Pdfops.t -> op_result
     method text_positioning_op :
-      State.page_desc -> State.Text.t -> Pdfops.t -> 'a -> 'a option
+      State.page_desc -> State.Text.t -> Pdfops.t -> op_result
     method path_construction_op :
-      State.page_desc -> State.Path.t -> Pdfops.t -> 'a -> 'a option
+      State.page_desc -> State.Path.t -> Pdfops.t -> op_result
     method path_painting_op :
-      State.page_desc -> State.Path.t -> Pdfops.t -> 'a -> 'a option
+      State.page_desc -> State.Path.t -> Pdfops.t -> op_result
 
-    method page : Pdf.t -> Pdfpage.t -> 'a -> 'a
+    method text_show :
+      State.page_desc -> State.Text.t -> width:float -> string -> unit
+    method text_position :
+      State.page_desc ->
+      State.Text.t ->
+      ?tm:Pdftransform.transform_matrix ->
+      ?lm:Pdftransform.transform_matrix ->
+      unit -> unit
+
+    method page : Pdf.t -> Pdfpage.t -> unit
   end
 
-  class ['a] read : ['a] reader
+  class read : reader
 
   (* Utilities *)
+
+  (* Text space -> device space transformation matrix *)
   val rendering_matrix :
     State.page_desc -> State.Text.t -> Pdftransform.transform_matrix
+
   val character_codes_of_text :
     State.page_desc -> string -> int list
-  val character_codes_width :
-      State.page_desc -> [`CharCodes of int list | `Adjust of float] list ->
-      float
+
+  (* In text space units *)
+  val adjust_width : State.page_desc -> float -> float
+
+  (* takes text space units, in text space units *)
+  val char_width : State.page_desc -> float -> int -> float
+
+  val glyphspace_to_textspace : State.page_desc -> float -> float
+
+  val glyphspace_char_width : State.page_desc -> float -> int -> float
+
+  (* In text space units *)
+  val character_codes_width : State.page_desc -> int list -> float
+
+  val get_width : State.page_desc -> int -> float
+  val get_kern : State.page_desc -> int -> int -> float
 end
