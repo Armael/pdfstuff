@@ -318,7 +318,7 @@ struct
     let open State.Graphics in
     -. (adjust /. 1000.) *. st#st#text.fs *. st#st#text.h
 
-  let glyphspace_to_textspace st w =
+  let glyphspace_to_textspace st (x, y) =
     let open Pdftext in
     let open State.Graphics in
     let glyphspace_to_textspace_m =
@@ -333,8 +333,7 @@ struct
         Pdftransform.mkscale (0., 0.) (1. /. 1000.) 0.
     in
     Pdftransform.transform_matrix glyphspace_to_textspace_m
-      (w, 0.)
-    |> fst
+      (x, y)
 
   let char_width st w c =
     let open State.Graphics in
@@ -343,7 +342,7 @@ struct
     st#st#text.h
 
   let glyphspace_char_width st w c =
-    char_width st (glyphspace_to_textspace st w) c
+    char_width st (glyphspace_to_textspace st (w, 0.) |> fst) c
 
   let mk_get_width_kern (st: State.page_desc) =
     let open Pdftext in

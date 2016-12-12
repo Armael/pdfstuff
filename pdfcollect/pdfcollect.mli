@@ -174,7 +174,7 @@ module Make : functor (State: State) -> sig
   (* takes text space units, in text space units *)
   val char_width : State.page_desc -> float -> int -> float
 
-  val glyphspace_to_textspace : State.page_desc -> float -> float
+  val glyphspace_to_textspace : State.page_desc -> float * float -> float * float
 
   val glyphspace_char_width : State.page_desc -> float -> int -> float
 
