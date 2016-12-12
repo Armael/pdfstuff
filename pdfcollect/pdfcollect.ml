@@ -764,38 +764,3 @@ end
    Pdftext.text_extractor_of_font & co, it uses the /ToUnicode map if present
    etc. Support seems however limited for composite fonts.
 *)
-
-
-(*****************
- * Debug functions
- *****************)
-
-(* let collect_page1 pdfname = *)
-(*   let pdf = Pdfread.pdf_of_file None None pdfname in *)
-(*   let page1 = List.hd (Pdfpage.pages_of_pagetree pdf) in *)
-(*   collect pdf page1 *)
-
-
-(* let draw_lines lines = *)
-(*   let dl (p1, p2) = *)
-(*     Graphics.moveto (V2.x p1 |> int_of_float) (V2.y p1 |> int_of_float); *)
-(*     Graphics.lineto (V2.x p2 |> int_of_float) (V2.y p2 |> int_of_float) *)
-(*   in *)
-(*   List.iter dl lines *)
-
-(* let draw_rects rects = *)
-(*   let dr b = *)
-(*     Graphics.draw_rect *)
-(*       (Box2.ox b |> int_of_float) *)
-(*       (Box2.oy b |> int_of_float) *)
-(*       (Box2.w b |> int_of_float) *)
-(*       (Box2.h b |> int_of_float) *)
-(*   in *)
-(*   List.iter dr rects *)
-
-(* let draw_texts texts = *)
-(*   let dt (pos, txt) = *)
-(*     Graphics.moveto (V2.x pos |> int_of_float) (V2.y pos |> int_of_float); *)
-(*     Graphics.draw_string txt *)
-(*   in *)
-(*   List.iter dt texts *)
